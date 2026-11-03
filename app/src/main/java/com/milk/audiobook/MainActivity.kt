@@ -17,7 +17,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -35,6 +37,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import kotlinx.coroutines.delay
+import java.io.File
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -54,14 +57,30 @@ private fun fmt(ms: Long): String {
     return "%d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60)
 }
 
+private sealed interface Dlg {
+    class Rename(val b: Book) : Dlg
+    class Delete(val b: Book) : Dlg
+    class AddTo(val b: Book) : Dlg
+    class Pick(val b: Book, val move: Boolean) : Dlg
+    class NewPlaylistFor(val b: Book) : Dlg
+    class DeletePlaylist(val name: String) : Dlg
+    object NewPlaylist : Dlg
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun App(vm: LibraryViewModel = viewModel()) {
     val ctx = LocalContext.current
     var access by remember { mutableStateOf(hasAccess(ctx)) }
-    var query by remember { mutableStateOf("") }
+    var tab by remember { mutableIntStateOf(0) }
+    var dlg by remember { mutableStateOf<Dlg?>(null) }
+    var openList by remember { mutableStateOf<String?>(null) }
+    val snack = remember { SnackbarHostState() }
 
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { access = hasAccess(ctx) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        access = hasAccess(ctx)
+        vm.refresh()
+    }
 
     val legacyLauncher = rememberLauncherForActivityResult(RequestPermission()) { access = it }
     val notifLauncher = rememberLauncherForActivityResult(RequestPermission()) { }
@@ -70,11 +89,27 @@ fun App(vm: LibraryViewModel = viewModel()) {
         if (Build.VERSION.SDK_INT >= 33) notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
     LaunchedEffect(access) { if (access) vm.scan() }
+    LaunchedEffect(vm.message) {
+        val m = vm.message
+        if (m != null) {
+            snack.showSnackbar(m)
+            vm.message = null
+        }
+    }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(3000)
+            vm.refresh()
+        }
+    }
 
     val holder = remember { PlayerHolder(ctx) }
     DisposableEffect(Unit) { onDispose { holder.release() } }
 
+    Dialogs(dlg, { dlg = it }, vm, holder)
+
     Scaffold(
+        snackbarHost = { SnackbarHost(snack) },
         topBar = {
             TopAppBar(
                 title = { Text("Milk Audiobooks") },
@@ -113,47 +148,359 @@ fun App(vm: LibraryViewModel = viewModel()) {
                 return@Column
             }
 
-            OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
-                label = { Text("Buscar") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
-            )
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Switch(checked = vm.onlyLong, onCheckedChange = { vm.onlyLong = it; vm.scan() })
-                Spacer(Modifier.width(8.dp))
-                Text("Ocultar áudios curtos (< 5 MB)", Modifier.weight(1f))
+            TabRow(selectedTabIndex = tab) {
+                Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Biblioteca") })
+                Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Playlists") })
             }
-            if (vm.scanning) {
-                LinearProgressIndicator(Modifier.fillMaxWidth())
-                Text("${vm.books.size} encontrados...", Modifier.padding(12.dp))
+            if (tab == 0) {
+                LibraryTab(vm, holder) { dlg = it }
             } else {
-                Text("${vm.books.size} áudios", Modifier.padding(12.dp))
+                PlaylistsTab(vm, holder, openList, { openList = it }) { dlg = it }
             }
+        }
+    }
+}
 
-            val shown = vm.books.filter {
-                query.isBlank() || it.title.contains(query, true) || it.folder.contains(query, true)
+@Composable
+private fun LibraryTab(vm: LibraryViewModel, holder: PlayerHolder, show: (Dlg) -> Unit) {
+    val ctx = LocalContext.current
+    var query by remember { mutableStateOf("") }
+    val tick = vm.tick
+    val last = remember(tick) { Store.last(ctx)?.let { vm.bookOf(it) } }
+
+    Column(Modifier.fillMaxSize()) {
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            label = { Text("Buscar") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
+        )
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Switch(checked = vm.onlyLong, onCheckedChange = { vm.onlyLong = it; vm.scan() })
+            Spacer(Modifier.width(8.dp))
+            Text("Ocultar áudios curtos (< 5 MB)", Modifier.weight(1f))
+        }
+        if (!holder.active && last != null) {
+            OutlinedButton(
+                onClick = { holder.play(last) },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
+            ) {
+                Text("Continuar: ${last.title}", maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        if (vm.scanning) {
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+            Text("${vm.books.size} encontrados...", Modifier.padding(12.dp))
+        } else {
+            Text("${vm.books.size} áudios", Modifier.padding(12.dp))
+        }
+
+        val shown = vm.books.filter {
+            query.isBlank() || it.title.contains(query, true) || it.folder.contains(query, true)
+        }
+        LazyColumn(Modifier.fillMaxSize()) {
+            items(shown, key = { it.path }) { b ->
+                val actions: List<Pair<String, () -> Unit>> = listOf(
+                    "Tocar" to { holder.play(b) },
+                    "Adicionar à playlist" to { show(Dlg.AddTo(b)) },
+                    "Renomear" to { show(Dlg.Rename(b)) },
+                    "Mover" to { show(Dlg.Pick(b, true)) },
+                    "Copiar" to { show(Dlg.Pick(b, false)) },
+                    "Excluir" to { show(Dlg.Delete(b)) }
+                )
+                BookRow(b, tick, actions) { holder.play(b) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlaylistsTab(
+    vm: LibraryViewModel,
+    holder: PlayerHolder,
+    open: String?,
+    setOpen: (String?) -> Unit,
+    show: (Dlg) -> Unit
+) {
+    val tick = vm.tick
+    val pl = vm.playlists.firstOrNull { it.name == open }
+    LaunchedEffect(open, pl) { if (open != null && pl == null) setOpen(null) }
+
+    if (pl == null) {
+        Column(Modifier.fillMaxSize()) {
+            Button(
+                onClick = { show(Dlg.NewPlaylist) },
+                modifier = Modifier.fillMaxWidth().padding(12.dp)
+            ) { Text("Nova playlist") }
+            if (vm.playlists.isEmpty()) {
+                Text(
+                    "Nenhuma playlist. Crie uma e adicione áudios pelo menu ⋮ da biblioteca.",
+                    Modifier.padding(16.dp)
+                )
             }
             LazyColumn(Modifier.fillMaxSize()) {
-                items(shown, key = { it.path }) { b ->
+                items(vm.playlists, key = { it.name }) { p ->
                     Column(
-                        Modifier.fillMaxWidth().clickable { holder.play(b) }
-                            .padding(horizontal = 16.dp, vertical = 10.dp)
+                        Modifier.fillMaxWidth().clickable { setOpen(p.name) }
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
                     ) {
-                        Text(b.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.bodyLarge)
-                        Text("${b.folder} • %.1f MB".format(b.sizeMb),
-                            style = MaterialTheme.typography.bodySmall)
+                        Text(p.name, style = MaterialTheme.typography.bodyLarge)
+                        Text("${p.items.size} áudios", style = MaterialTheme.typography.bodySmall)
                     }
                     HorizontalDivider()
                 }
             }
         }
+        return
     }
+
+    val list = remember(pl.items, vm.books.size, tick) { pl.items.mapNotNull { vm.bookOf(it) } }
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { setOpen(null) }) { Text("< Voltar") }
+            Text(
+                pl.name, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.titleMedium
+            )
+        }
+        Row(
+            Modifier.padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Button(onClick = { holder.playQueue(list, 0) }, enabled = list.isNotEmpty()) {
+                Text("Tocar tudo")
+            }
+            OutlinedButton(onClick = { show(Dlg.DeletePlaylist(pl.name)) }) {
+                Text("Excluir playlist")
+            }
+        }
+        if (list.isEmpty()) {
+            Text("Vazia. Adicione áudios pelo menu ⋮ da biblioteca.", Modifier.padding(16.dp))
+        }
+        LazyColumn(Modifier.fillMaxSize()) {
+            itemsIndexed(list, key = { _, b -> b.path }) { i, b ->
+                val actions: List<Pair<String, () -> Unit>> = listOf(
+                    "Remover da playlist" to { vm.removeFromPlaylist(pl.name, b.path) }
+                )
+                BookRow(b, tick, actions) { holder.playQueue(list, i) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BookRow(
+    b: Book,
+    tick: Int,
+    actions: List<Pair<String, () -> Unit>>,
+    onClick: () -> Unit
+) {
+    val ctx = LocalContext.current
+    val progress = remember(tick, b.path) { Store.progress(ctx, b.path) }
+    var menu by remember { mutableStateOf(false) }
+
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 16.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                b.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyLarge
+            )
+            val pct = if (progress > 0f) " • ${(progress * 100).toInt()}%" else ""
+            Text(
+                "${b.folder} • " + "%.1f MB".format(b.sizeMb) + pct,
+                style = MaterialTheme.typography.bodySmall
+            )
+            if (progress > 0f) {
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp, end = 8.dp)
+                )
+            }
+        }
+        Box {
+            IconButton(onClick = { menu = true }) {
+                Icon(Icons.Filled.MoreVert, contentDescription = "Opções")
+            }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                actions.forEach { (label, act) ->
+                    DropdownMenuItem(text = { Text(label) }, onClick = { menu = false; act() })
+                }
+            }
+        }
+    }
+    HorizontalDivider()
+}
+
+@Composable
+private fun Dialogs(dlg: Dlg?, set: (Dlg?) -> Unit, vm: LibraryViewModel, holder: PlayerHolder) {
+    val close: () -> Unit = { set(null) }
+    when (dlg) {
+        null -> Unit
+
+        is Dlg.Rename -> TextDialog("Renomear", dlg.b.title, "Novo nome", close) { name ->
+            holder.stopIfUsing(dlg.b.path)
+            vm.rename(dlg.b, name)
+            close()
+        }
+
+        is Dlg.NewPlaylist -> TextDialog("Nova playlist", "", "Nome", close) { name ->
+            vm.createPlaylist(name)
+            close()
+        }
+
+        is Dlg.NewPlaylistFor -> TextDialog("Nova playlist", "", "Nome", close) { name ->
+            vm.createPlaylist(name, dlg.b.path)
+            close()
+        }
+
+        is Dlg.DeletePlaylist -> AlertDialog(
+            onDismissRequest = close,
+            title = { Text("Excluir playlist?") },
+            text = { Text("\"${dlg.name}\" será removida. Os áudios continuam no aparelho.") },
+            confirmButton = {
+                TextButton(onClick = { vm.deletePlaylist(dlg.name); close() }) { Text("Excluir") }
+            },
+            dismissButton = { TextButton(onClick = close) { Text("Cancelar") } }
+        )
+
+        is Dlg.Delete -> AlertDialog(
+            onDismissRequest = close,
+            title = { Text("Excluir áudio?") },
+            text = { Text("\"${dlg.b.title}\" será apagado do aparelho. Não dá para desfazer.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    holder.stopIfUsing(dlg.b.path)
+                    vm.delete(dlg.b)
+                    close()
+                }) { Text("Excluir") }
+            },
+            dismissButton = { TextButton(onClick = close) { Text("Cancelar") } }
+        )
+
+        is Dlg.AddTo -> AlertDialog(
+            onDismissRequest = close,
+            title = { Text("Adicionar à playlist") },
+            text = {
+                LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                    item {
+                        Text(
+                            "+ Nova playlist",
+                            Modifier.fillMaxWidth().clickable { set(Dlg.NewPlaylistFor(dlg.b)) }.padding(12.dp),
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                    }
+                    items(vm.playlists, key = { it.name }) { p ->
+                        Text(
+                            p.name,
+                            Modifier.fillMaxWidth().clickable {
+                                vm.addToPlaylist(p.name, dlg.b.path)
+                                close()
+                            }.padding(12.dp),
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = close) { Text("Cancelar") } }
+        )
+
+        is Dlg.Pick -> FolderPicker(
+            title = if (dlg.move) "Mover para..." else "Copiar para...",
+            start = File(dlg.b.path).parentFile ?: Environment.getExternalStorageDirectory(),
+            onDismiss = close
+        ) { dir ->
+            if (dlg.move) {
+                holder.stopIfUsing(dlg.b.path)
+                vm.move(dlg.b, dir)
+            } else {
+                vm.copy(dlg.b, dir)
+            }
+            close()
+        }
+    }
+}
+
+@Composable
+private fun TextDialog(
+    title: String,
+    initial: String,
+    label: String,
+    onDismiss: () -> Unit,
+    onOk: (String) -> Unit
+) {
+    var text by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                label = { Text(label) },
+                singleLine = true
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onOk(text) }, enabled = text.isNotBlank()) { Text("OK") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
+    )
+}
+
+@Composable
+private fun FolderPicker(title: String, start: File, onDismiss: () -> Unit, onPick: (File) -> Unit) {
+    var dir by remember { mutableStateOf(start) }
+    var creating by remember { mutableStateOf(false) }
+    val subs = remember(dir) { FileOps.subdirs(dir) }
+
+    if (creating) {
+        TextDialog("Nova pasta", "", "Nome da pasta", { creating = false }) { n ->
+            FileOps.mkdir(dir, n)?.let { dir = it }
+            creating = false
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column {
+                Text(dir.absolutePath, style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                    val up = dir.parentFile
+                    if (up != null && up.canRead()) {
+                        item {
+                            Text(
+                                ".. (subir)",
+                                Modifier.fillMaxWidth().clickable { dir = up }.padding(12.dp)
+                            )
+                        }
+                    }
+                    items(subs, key = { it.absolutePath }) { f ->
+                        Text(
+                            f.name + "/",
+                            Modifier.fillMaxWidth().clickable { dir = f }.padding(12.dp)
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onPick(dir) }) { Text("Escolher esta pasta") } },
+        dismissButton = {
+            Row {
+                TextButton(onClick = { creating = true }) { Text("Nova pasta") }
+                TextButton(onClick = onDismiss) { Text("Cancelar") }
+            }
+        }
+    )
 }
 
 @Composable
@@ -164,6 +511,8 @@ fun PlayerBar(c: MediaController) {
     var dur by remember { mutableLongStateOf(c.duration.coerceAtLeast(0L)) }
     var title by remember { mutableStateOf(c.mediaMetadata.title?.toString() ?: "") }
     var speed by remember { mutableFloatStateOf(c.playbackParameters.speed) }
+    var repeat by remember { mutableIntStateOf(c.repeatMode) }
+    var count by remember { mutableIntStateOf(c.mediaItemCount) }
 
     DisposableEffect(c) {
         val l = object : Player.Listener {
@@ -172,6 +521,8 @@ fun PlayerBar(c: MediaController) {
                 dur = p.duration.coerceAtLeast(0L)
                 title = p.mediaMetadata.title?.toString() ?: ""
                 speed = p.playbackParameters.speed
+                repeat = p.repeatMode
+                count = p.mediaItemCount
             }
         }
         c.addListener(l)
@@ -181,7 +532,6 @@ fun PlayerBar(c: MediaController) {
     LaunchedEffect(c, playing) {
         do {
             pos = c.currentPosition
-            c.currentMediaItem?.mediaId?.let { Prefs.put(ctx, it, pos) }
             if (playing) delay(1000)
         } while (playing)
     }
@@ -204,6 +554,7 @@ fun PlayerBar(c: MediaController) {
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                if (count > 1) TextButton(onClick = { c.seekToPreviousMediaItem() }) { Text("|<") }
                 TextButton(onClick = { c.seekBack() }) { Text("-15s") }
                 FilledIconButton(onClick = { if (playing) c.pause() else c.play() }) {
                     Icon(
@@ -212,11 +563,35 @@ fun PlayerBar(c: MediaController) {
                     )
                 }
                 TextButton(onClick = { c.seekForward() }) { Text("+30s") }
+                if (count > 1) TextButton(onClick = { c.seekToNextMediaItem() }) { Text(">|") }
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 TextButton(onClick = {
                     val steps = listOf(0.75f, 1f, 1.25f, 1.5f, 2f)
                     val next = steps.firstOrNull { it > speed + 0.01f } ?: steps.first()
                     c.setPlaybackSpeed(next)
                 }) { Text("${speed}x") }
+                TextButton(onClick = {
+                    val next = when (repeat) {
+                        Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ONE
+                        Player.REPEAT_MODE_ONE -> Player.REPEAT_MODE_ALL
+                        else -> Player.REPEAT_MODE_OFF
+                    }
+                    c.repeatMode = next
+                    Store.setRepeat(ctx, next)
+                }) {
+                    Text(
+                        when (repeat) {
+                            Player.REPEAT_MODE_ONE -> "Loop: 1 áudio"
+                            Player.REPEAT_MODE_ALL -> "Loop: lista"
+                            else -> "Loop: off"
+                        }
+                    )
+                }
             }
         }
     }
