@@ -555,14 +555,14 @@ fun PlayerBar(c: MediaController) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (count > 1) TextButton(onClick = { c.seekToPreviousMediaItem() }) { Text("|<") }
-                TextButton(onClick = { c.seekBack() }) { Text("-15s") }
+                TextButton(onClick = { c.seekBack() }) { Text("-10s") }
                 FilledIconButton(onClick = { if (playing) c.pause() else c.play() }) {
                     Icon(
                         if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                         contentDescription = "Play/Pause"
                     )
                 }
-                TextButton(onClick = { c.seekForward() }) { Text("+30s") }
+                TextButton(onClick = { c.seekForward() }) { Text("+10s") }
                 if (count > 1) TextButton(onClick = { c.seekToNextMediaItem() }) { Text(">|") }
             }
             Row(
