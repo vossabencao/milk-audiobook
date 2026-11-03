@@ -97,4 +97,147 @@ class LibraryViewModel(private val app: Application) : AndroidViewModel(app) {
     fun addToPlaylist(name: String, path: String) {
         val i = playlists.indexOfFirst { it.name == name }
         if (i < 0) return
-        val p
+        val p = playlists[i]
+        if (path in p.items) {
+            message = "Já está na playlist"
+            return
+        }
+        playlists[i] = p.copy(items = p.items + path)
+        persist()
+        message = "Adicionado a $name"
+    }
+
+    fun removeFromPlaylist(name: String, path: String) {
+        val i = playlists.indexOfFirst { it.name == name }
+        if (i < 0) return
+        playlists[i] = playlists[i].copy(items = playlists[i].items - path)
+        persist()
+    }
+
+    // ---------- editar arquivos ----------
+
+    private fun scanFiles(paths: List<String>) {
+        try {
+            MediaScannerConnection.scanFile(app, paths.toTypedArray(), null, null)
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun afterMove(old: Book, f: File) {
+        val nb = f.toBook()
+        val i = books.indexOfFirst { it.path == old.path }
+        if (i >= 0) books[i] = nb else books.add(nb)
+        books.sortBy { it.title.lowercase() }
+        Store.move(app, old.path, nb.path)
+        mapPlaylists { l -> l.map { if (it == old.path) nb.path else it } }
+        scanFiles(listOf(old.path, nb.path))
+        tick++
+    }
+
+    fun rename(b: Book, name: String) {
+        viewModelScope.launch {
+            val r = withContext(Dispatchers.IO) { FileOps.rename(File(b.path), name) }
+            r.onSuccess { f ->
+                afterMove(b, f)
+                message = "Renomeado"
+            }.onFailure { message = it.message ?: "Falha ao renomear" }
+        }
+    }
+
+    fun move(b: Book, dir: File) {
+        message = "Movendo..."
+        viewModelScope.launch {
+            val r = withContext(Dispatchers.IO) { FileOps.move(File(b.path), dir) }
+            r.onSuccess { f ->
+                afterMove(b, f)
+                message = "Movido para ${dir.name}"
+            }.onFailure { message = it.message ?: "Falha ao mover" }
+        }
+    }
+
+    fun copy(b: Book, dir: File) {
+        message = "Copiando..."
+        viewModelScope.launch {
+            val r = withContext(Dispatchers.IO) { FileOps.copy(File(b.path), dir) }
+            r.onSuccess { f ->
+                val nb = f.toBook()
+                books.add(nb)
+                books.sortBy { it.title.lowercase() }
+                scanFiles(listOf(nb.path))
+                tick++
+                message = "Copiado para ${dir.name}"
+            }.onFailure { message = it.message ?: "Falha ao copiar" }
+        }
+    }
+
+    fun delete(b: Book) {
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { FileOps.delete(File(b.path)) }
+            if (ok) {
+                books.removeAll { it.path == b.path }
+                Store.forget(app, b.path)
+                mapPlaylists { l -> l - b.path }
+                scanFiles(listOf(b.path))
+                tick++
+                message = "Excluído"
+            } else {
+                message = "Falha ao excluir"
+            }
+        }
+    }
+}
+
+class PlayerHolder(private val ctx: Context) {
+    var controller by mutableStateOf<MediaController?>(null)
+        private set
+    var active by mutableStateOf(false)
+        private set
+
+    private val future: ListenableFuture<MediaController> =
+        MediaController.Builder(
+            ctx, SessionToken(ctx, ComponentName(ctx, PlaybackService::class.java))
+        ).buildAsync()
+
+    init {
+        future.addListener({
+            val c = future.get()
+            controller = c
+            active = c.mediaItemCount > 0
+        }, ContextCompat.getMainExecutor(ctx))
+    }
+
+    private fun item(book: Book) = MediaItem.Builder()
+        .setMediaId(book.path)
+        .setUri(Uri.fromFile(File(book.path)))
+        .setMediaMetadata(
+            MediaMetadata.Builder().setTitle(book.title).setArtist(book.folder).build()
+        )
+        .build()
+
+    fun play(book: Book) = playQueue(listOf(book), 0)
+
+    fun playQueue(list: List<Book>, start: Int) {
+        val c = controller ?: return
+        if (list.isEmpty()) return
+        val i = start.coerceIn(0, list.size - 1)
+        c.repeatMode = Store.getRepeat(ctx)
+        c.setMediaItems(list.map { item(it) }, i, Store.resumePos(ctx, list[i].path))
+        c.prepare()
+        c.play()
+        active = true
+    }
+
+    fun stopIfUsing(path: String) {
+        val c = controller ?: return
+        for (i in 0 until c.mediaItemCount) {
+            if (c.getMediaItemAt(i).mediaId == path) {
+                c.stop()
+                c.clearMediaItems()
+                active = false
+                return
+            }
+        }
+    }
+
+    fun release() = MediaController.releaseFuture(future)
+}
