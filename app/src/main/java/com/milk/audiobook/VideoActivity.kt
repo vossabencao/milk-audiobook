@@ -1,7 +1,9 @@
 package com.milk.audiobook
 
 import android.app.PictureInPictureParams
+import android.content.ComponentName
 import android.content.Context
+import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.media.AudioManager
 import android.net.Uri
@@ -11,6 +13,7 @@ import android.provider.OpenableColumns
 import android.provider.Settings
 import android.util.Rational
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -34,12 +37,25 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.ClosedCaption
+import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.RepeatOne
+import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.ScreenRotation
+import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -61,10 +77,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -72,25 +89,32 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionToken
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
 import java.io.File
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.random.Random
 
 private val SUB_EXT = setOf("srt", "vtt", "ass", "ssa", "ttml")
 
-private fun vfmt(ms: Long): String {
-    val s = ms / 1000
-    return "%d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60)
+private fun tfmt(ms: Long): String {
+    val s = (ms / 1000).coerceAtLeast(0L)
+    val h = s / 3600
+    return if (h > 0) "%d:%02d:%02d".format(h, (s % 3600) / 60, s % 60)
+    else "%02d:%02d".format((s % 3600) / 60, s % 60)
 }
 
 private fun subMime(name: String): String = when (name.substringAfterLast('.', "").lowercase()) {
@@ -106,12 +130,31 @@ private fun trackLabel(f: Format, n: Int): String {
     return name + ch
 }
 
+@Composable
+private fun CtlIcon(
+    icon: ImageVector,
+    desc: String,
+    active: Boolean = false,
+    onClick: () -> Unit
+) {
+    IconButton(onClick = onClick) {
+        Icon(
+            icon,
+            contentDescription = desc,
+            tint = if (active) Color(0xFF4FC3F7) else Color.White
+        )
+    }
+}
+
 @OptIn(UnstableApi::class)
 class VideoActivity : ComponentActivity() {
     private lateinit var player: ExoPlayer
     private var path = ""
     private var title by mutableStateOf("")
     private var pip by mutableStateOf(false)
+    private var loop by mutableIntStateOf(0)
+    private var shuffle by mutableStateOf(false)
+    private var handoff = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -136,6 +179,9 @@ class VideoActivity : ComponentActivity() {
                 true
             )
             .build()
+        val prefs = getSharedPreferences("milk", Context.MODE_PRIVATE)
+        shuffle = prefs.getBoolean("vshuffle", false)
+        setLoop(prefs.getInt("vloop", 0))
         load(p)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) { VideoScreen() }
@@ -151,6 +197,25 @@ class VideoActivity : ComponentActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) hideBars()
+    }
+
+    private fun setLoop(v: Int) {
+        loop = v
+        getSharedPreferences("milk", Context.MODE_PRIVATE).edit().putInt("vloop", v).apply()
+        player.repeatMode = if (v == 1) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
+    }
+
+    private fun setShuffle(v: Boolean) {
+        shuffle = v
+        getSharedPreferences("milk", Context.MODE_PRIVATE).edit().putBoolean("vshuffle", v).apply()
+    }
+
+    private fun rotate() {
+        requestedOrientation =
+            if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            else
+                ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
     }
 
     private fun sidecars(f: File): List<File> {
@@ -188,11 +253,20 @@ class VideoActivity : ComponentActivity() {
             f.isFile && f.extension.lowercase() in MediaExt.VIDEO
         }?.sortedBy { it.name.lowercase() } ?: emptyList()
 
-    private fun goTo(d: Int) {
+    private fun goTo(d: Int, wrap: Boolean = false) {
         val l = siblings()
+        if (l.isEmpty()) return
         val i = l.indexOfFirst { it.absolutePath == path }
-        val n = i + d
-        if (i >= 0 && n in l.indices) load(l[n].absolutePath)
+        if (i < 0) return
+        if (d > 0 && shuffle && l.size > 1) {
+            var n = i
+            while (n == i) n = Random.nextInt(l.size)
+            load(l[n].absolutePath)
+            return
+        }
+        var n = i + d
+        if (wrap) n = (n + l.size) % l.size
+        if (n in l.indices) load(l[n].absolutePath)
     }
 
     private fun saveNow() {
@@ -259,6 +333,75 @@ class VideoActivity : ComponentActivity() {
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
             .build()
+    }
+
+    private fun audioItem(f: File): MediaItem =
+        MediaItem.Builder()
+            .setMediaId(f.absolutePath)
+            .setUri(Uri.fromFile(f))
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(f.nameWithoutExtension)
+                    .setArtist(f.parentFile?.name ?: "")
+                    .build()
+            )
+            .build()
+
+    private fun playAsAudio() {
+        if (handoff) return
+        handoff = true
+        saveNow()
+        val files = siblings()
+        val list = if (files.isEmpty()) listOf(File(path)) else files
+        val idx = list.indexOfFirst { it.absolutePath == path }.coerceAtLeast(0)
+        val startPos = player.currentPosition
+        val mode = loop
+        val shuf = shuffle
+        player.pause()
+
+        val future = MediaController.Builder(
+            this, SessionToken(this, ComponentName(this, PlaybackService::class.java))
+        ).buildAsync()
+        future.addListener({
+            val c = try {
+                future.get()
+            } catch (e: Exception) {
+                null
+            }
+            if (c == null) {
+                handoff = false
+                Toast.makeText(this, "Falha ao iniciar o áudio", Toast.LENGTH_SHORT).show()
+            } else {
+                c.addListener(object : Player.Listener {
+                    override fun onIsPlayingChanged(isPlaying: Boolean) {
+                        if (isPlaying) {
+                            MediaController.releaseFuture(future)
+                            finish()
+                        }
+                    }
+
+                    override fun onPlayerError(error: PlaybackException) {
+                        handoff = false
+                        MediaController.releaseFuture(future)
+                        Toast.makeText(
+                            this@VideoActivity, "Falha ao tocar como áudio", Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                })
+                c.trackSelectionParameters = c.trackSelectionParameters.buildUpon()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
+                    .build()
+                c.repeatMode = when (mode) {
+                    1 -> Player.REPEAT_MODE_ONE
+                    2 -> Player.REPEAT_MODE_ALL
+                    else -> Player.REPEAT_MODE_OFF
+                }
+                c.shuffleModeEnabled = shuf
+                c.setMediaItems(list.map { audioItem(it) }, idx, startPos)
+                c.prepare()
+                c.play()
+            }
+        }, ContextCompat.getMainExecutor(this))
     }
 
     private fun enterPip() {
@@ -328,7 +471,7 @@ class VideoActivity : ComponentActivity() {
                 override fun onTracksChanged(t: Tracks) { tracks = t }
                 override fun onPlaybackParametersChanged(p: PlaybackParameters) { speed = p.speed }
                 override fun onPlaybackStateChanged(state: Int) {
-                    if (state == Player.STATE_ENDED) goTo(1)
+                    if (state == Player.STATE_ENDED && (loop == 2 || shuffle)) goTo(1, true)
                 }
             }
             player.addListener(l)
@@ -438,7 +581,7 @@ class VideoActivity : ComponentActivity() {
                                             val max = if (d != C.TIME_UNSET && d > 0) d else Long.MAX_VALUE
                                             target = (startPos + delta).coerceIn(0L, max)
                                             val sign = if (target - startPos >= 0) "+" else "-"
-                                            overlay = vfmt(target) + "  (" + sign +
+                                            overlay = tfmt(target) + "  (" + sign +
                                                 (abs(target - startPos) / 1000) + "s)"
                                         }
                                         2 -> {
@@ -472,13 +615,10 @@ class VideoActivity : ComponentActivity() {
                 }
 
                 if (visible && !locked) {
-                    Column(
-                        Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout),
-                        verticalArrangement = Arrangement.SpaceBetween
-                    ) {
+                    Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout)) {
                         Row(
-                            Modifier.fillMaxWidth().background(Color(0x99000000))
-                                .padding(horizontal = 4.dp),
+                            Modifier.align(Alignment.TopCenter).fillMaxWidth()
+                                .background(Color(0x99000000)).padding(horizontal = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             IconButton(onClick = { finish() }) {
@@ -489,68 +629,125 @@ class VideoActivity : ComponentActivity() {
                                 )
                             }
                             Text(
-                                title, Modifier.weight(1f), color = Color.White,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis
+                                title, Modifier.weight(1f).padding(vertical = 6.dp),
+                                color = Color.White
                             )
-                            TextButton(onClick = { dialog = 2; bump++ }) { Text("CC") }
-                            TextButton(onClick = { dialog = 1; bump++ }) { Text("Áudio") }
-                            TextButton(onClick = { enterPip() }) { Text("PiP") }
-                            TextButton(onClick = { locked = true; visible = false }) { Text("Travar") }
+                            CtlIcon(Icons.Filled.ClosedCaption, "Legendas") { dialog = 2; bump++ }
+                            CtlIcon(Icons.Filled.Audiotrack, "Faixa de áudio") { dialog = 1; bump++ }
+                        }
+
+                        Row(
+                            Modifier.align(Alignment.Center),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CtlIcon(Icons.Filled.SkipPrevious, "Anterior") {
+                                goTo(-1, loop == 2)
+                                bump++
+                            }
+                            CtlIcon(Icons.Filled.Replay10, "Voltar 10 segundos") {
+                                seekBy(-10_000L)
+                                bump++
+                            }
+                            FilledIconButton(onClick = {
+                                if (playing) player.pause() else player.play()
+                                bump++
+                            }) {
+                                Icon(
+                                    if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                    contentDescription = "Play/Pause"
+                                )
+                            }
+                            CtlIcon(Icons.Filled.Forward10, "Avançar 10 segundos") {
+                                seekBy(10_000L)
+                                bump++
+                            }
+                            CtlIcon(Icons.Filled.SkipNext, "Próximo") {
+                                goTo(1, loop == 2)
+                                bump++
+                            }
                         }
 
                         Column(
-                            Modifier.fillMaxWidth().background(Color(0x99000000))
+                            Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                                .background(Color(0x99000000))
                                 .padding(horizontal = 12.dp, vertical = 6.dp)
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(vfmt(pos), color = Color.White, style = MaterialTheme.typography.bodySmall)
-                                Slider(
-                                    value = pos.toFloat().coerceIn(0f, maxOf(dur, 1L).toFloat()),
-                                    onValueChange = { seeking = true; pos = it.toLong(); bump++ },
-                                    onValueChangeFinished = { player.seekTo(pos); seeking = false },
-                                    valueRange = 0f..maxOf(dur, 1L).toFloat(),
-                                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp)
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    tfmt(pos) + " / " + tfmt(dur),
+                                    color = Color.White,
+                                    style = MaterialTheme.typography.titleMedium
                                 )
-                                Text(vfmt(dur), color = Color.White, style = MaterialTheme.typography.bodySmall)
-                            }
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceEvenly,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                TextButton(onClick = { goTo(-1) }) { Text("|<") }
-                                TextButton(onClick = { seekBy(-10_000L); bump++ }) { Text("-10s") }
-                                FilledIconButton(onClick = {
-                                    if (playing) player.pause() else player.play()
-                                    bump++
-                                }) {
-                                    Icon(
-                                        if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                                        contentDescription = "Play/Pause"
-                                    )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    TextButton(onClick = {
+                                        val steps = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
+                                        val next = steps.firstOrNull { it > speed + 0.01f } ?: steps.first()
+                                        player.setPlaybackSpeed(next)
+                                        overlay = "Velocidade ${next}x"
+                                        bump++
+                                    }) {
+                                        Text("$speed", color = Color.White,
+                                            style = MaterialTheme.typography.titleMedium)
+                                    }
+                                    CtlIcon(Icons.Filled.ScreenRotation, "Girar a tela") {
+                                        rotate()
+                                        bump++
+                                    }
                                 }
-                                TextButton(onClick = { seekBy(10_000L); bump++ }) { Text("+10s") }
-                                TextButton(onClick = { goTo(1) }) { Text(">|") }
                             }
+                            Slider(
+                                value = pos.toFloat().coerceIn(0f, maxOf(dur, 1L).toFloat()),
+                                onValueChange = { seeking = true; pos = it.toLong(); bump++ },
+                                onValueChangeFinished = { player.seekTo(pos); seeking = false },
+                                valueRange = 0f..maxOf(dur, 1L).toFloat(),
+                                modifier = Modifier.fillMaxWidth()
+                            )
                             Row(
                                 Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceEvenly,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                TextButton(onClick = {
-                                    val steps = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
-                                    val next = steps.firstOrNull { it > speed + 0.01f } ?: steps.first()
-                                    player.setPlaybackSpeed(next)
+                                CtlIcon(Icons.Filled.LockOpen, "Travar controles") {
+                                    locked = true
+                                    visible = false
+                                }
+                                CtlIcon(Icons.Filled.AspectRatio, "Proporção da tela") {
+                                    aspect = (aspect + 1) % 3
+                                    overlay = when (aspect) {
+                                        1 -> "Tela: esticar"
+                                        2 -> "Tela: cortar"
+                                        else -> "Tela: ajustar"
+                                    }
                                     bump++
-                                }) { Text("Velocidade ${speed}x") }
-                                TextButton(onClick = { aspect = (aspect + 1) % 3; bump++ }) {
-                                    Text(
-                                        when (aspect) {
-                                            1 -> "Tela: esticar"
-                                            2 -> "Tela: cortar"
-                                            else -> "Tela: ajustar"
-                                        }
-                                    )
+                                }
+                                CtlIcon(Icons.Filled.PictureInPictureAlt, "Picture-in-picture") {
+                                    enterPip()
+                                }
+                                CtlIcon(Icons.Filled.Headphones, "Tocar como áudio") {
+                                    playAsAudio()
+                                }
+                                CtlIcon(
+                                    if (loop == 1) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
+                                    "Repetir",
+                                    active = loop != 0
+                                ) {
+                                    setLoop((loop + 1) % 3)
+                                    overlay = when (loop) {
+                                        1 -> "Loop: 1 vídeo"
+                                        2 -> "Loop: lista"
+                                        else -> "Loop: desligado"
+                                    }
+                                    bump++
+                                }
+                                CtlIcon(Icons.Filled.Shuffle, "Aleatório", active = shuffle) {
+                                    setShuffle(!shuffle)
+                                    overlay = if (shuffle) "Aleatório: ligado" else "Aleatório: desligado"
+                                    bump++
                                 }
                             }
                         }
@@ -559,9 +756,8 @@ class VideoActivity : ComponentActivity() {
 
                 if (locked && visible) {
                     Box(Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.CenterEnd) {
-                        FilledTonalButton(onClick = { locked = false; bump++ }) {
-                            Icon(Icons.Filled.Lock, contentDescription = null)
-                            Text("  Destravar")
+                        FilledIconButton(onClick = { locked = false; bump++ }) {
+                            Icon(Icons.Filled.Lock, contentDescription = "Destravar")
                         }
                     }
                 }
