@@ -54,6 +54,9 @@ object Store {
     fun getRepeat(c: Context): Int = sp(c).getInt("repeat", 0)
     fun setRepeat(c: Context, mode: Int) = sp(c).edit().putInt("repeat", mode).apply()
 
+    fun amoled(c: Context): Boolean = sp(c).getBoolean("amoled", false)
+    fun setAmoled(c: Context, v: Boolean) = sp(c).edit().putBoolean("amoled", v).apply()
+
     fun playlists(c: Context): List<Playlist> {
         val raw = sp(c).getString("playlists", null) ?: return emptyList()
         return try {
