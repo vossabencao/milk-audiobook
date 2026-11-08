@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -30,12 +31,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import kotlinx.coroutines.delay
@@ -82,6 +83,15 @@ private fun hasAccess(ctx: Context): Boolean =
 private fun fmt(ms: Long): String {
     val s = ms / 1000
     return "%d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60)
+}
+
+private fun playAudioOnly(holder: PlayerHolder, list: List<Book>, start: Int) {
+    holder.controller?.let {
+        it.trackSelectionParameters = it.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
+            .build()
+    }
+    holder.playQueue(list, start)
 }
 
 private sealed interface Dlg {
@@ -236,7 +246,7 @@ private fun VideosTab(vm: LibraryViewModel, holder: PlayerHolder, show: (Dlg) ->
             query.isBlank() || it.title.contains(query, true) || it.folder.contains(query, true)
         }
         LazyColumn(Modifier.fillMaxSize()) {
-            items(shown, key = { it.path }) { b ->
+            itemsIndexed(shown, key = { _, b -> b.path }) { i, b ->
                 val open: () -> Unit = {
                     holder.controller?.pause()
                     ctx.startActivity(Intent(ctx, VideoActivity::class.java).putExtra("path", b.path))
@@ -248,7 +258,14 @@ private fun VideosTab(vm: LibraryViewModel, holder: PlayerHolder, show: (Dlg) ->
                     "Copiar" to { show(Dlg.Pick(b, false)) },
                     "Excluir" to { show(Dlg.Delete(b)) }
                 )
-                BookRow(b, tick, actions) { open() }
+                BookRow(
+                    b, tick, actions,
+                    extra = {
+                        IconButton(onClick = { playAudioOnly(holder, shown, i) }) {
+                            Icon(Icons.Filled.Headphones, contentDescription = "Tocar como áudio")
+                        }
+                    }
+                ) { open() }
             }
         }
     }
@@ -282,7 +299,7 @@ private fun LibraryTab(vm: LibraryViewModel, holder: PlayerHolder, show: (Dlg) -
                 onClick = { holder.play(last) },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
             ) {
-                Text("Continuar: ${last.title}", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("Continuar: ${last.title}")
             }
         }
         if (vm.scanning) {
@@ -356,7 +373,7 @@ private fun PlaylistsTab(
         Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = { setOpen(null) }) { Text("< Voltar") }
             Text(
-                pl.name, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                pl.name, Modifier.weight(1f),
                 style = MaterialTheme.typography.titleMedium
             )
         }
@@ -390,6 +407,7 @@ private fun BookRow(
     b: Book,
     tick: Int,
     actions: List<Pair<String, () -> Unit>>,
+    extra: (@Composable () -> Unit)? = null,
     onClick: () -> Unit
 ) {
     val ctx = LocalContext.current
@@ -402,7 +420,7 @@ private fun BookRow(
     ) {
         Column(Modifier.weight(1f)) {
             Text(
-                b.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                b.title,
                 style = MaterialTheme.typography.bodyLarge
             )
             val pct = if (progress > 0f) " • ${(progress * 100).toInt()}%" else ""
@@ -417,6 +435,7 @@ private fun BookRow(
                 )
             }
         }
+        extra?.invoke()
         Box {
             IconButton(onClick = { menu = true }) {
                 Icon(Icons.Filled.MoreVert, contentDescription = "Opções")
@@ -631,7 +650,7 @@ fun PlayerBar(c: MediaController) {
 
     Surface(tonalElevation = 6.dp) {
         Column(Modifier.fillMaxWidth().padding(12.dp)) {
-            Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(title)
             Slider(
                 value = pos.toFloat().coerceIn(0f, maxOf(dur, 1L).toFloat()),
                 onValueChange = { pos = it.toLong() },
