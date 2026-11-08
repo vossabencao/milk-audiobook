@@ -28,8 +28,11 @@ data class Playlist(val name: String, val items: List<String>)
 
 class LibraryViewModel(private val app: Application) : AndroidViewModel(app) {
     val books = mutableStateListOf<Book>()
+    val videos = mutableStateListOf<Book>()
     val playlists = mutableStateListOf<Playlist>()
     var scanning by mutableStateOf(false)
+        private set
+    var scanningV by mutableStateOf(false)
         private set
     var onlyLong by mutableStateOf(true)
     var tick by mutableIntStateOf(0)
@@ -38,12 +41,19 @@ class LibraryViewModel(private val app: Application) : AndroidViewModel(app) {
 
     private var job: Job? = null
     private var gen = 0
+    private var jobV: Job? = null
+    private var genV = 0
 
     init {
         playlists.addAll(Store.playlists(app))
     }
 
     fun refresh() { tick++ }
+
+    fun scanAll() {
+        scan()
+        scanVideos()
+    }
 
     fun scan() {
         job?.cancel()
@@ -57,6 +67,21 @@ class LibraryViewModel(private val app: Application) : AndroidViewModel(app) {
                 books.sortBy { it.title.lowercase() }
             } finally {
                 if (id == gen) scanning = false
+            }
+        }
+    }
+
+    fun scanVideos() {
+        jobV?.cancel()
+        val id = ++genV
+        videos.clear()
+        scanningV = true
+        jobV = viewModelScope.launch {
+            try {
+                AudioScanner.scan(app, 0L, video = true).collect { videos.add(it) }
+                videos.sortBy { it.title.lowercase() }
+            } finally {
+                if (id == genV) scanningV = false
             }
         }
     }
@@ -125,9 +150,10 @@ class LibraryViewModel(private val app: Application) : AndroidViewModel(app) {
 
     private fun afterMove(old: Book, f: File) {
         val nb = f.toBook()
-        val i = books.indexOfFirst { it.path == old.path }
-        if (i >= 0) books[i] = nb else books.add(nb)
-        books.sortBy { it.title.lowercase() }
+        val target = if (isVideo(nb.path)) videos else books
+        val i = target.indexOfFirst { it.path == old.path }
+        if (i >= 0) target[i] = nb else target.add(nb)
+        target.sortBy { it.title.lowercase() }
         Store.move(app, old.path, nb.path)
         mapPlaylists { l -> l.map { if (it == old.path) nb.path else it } }
         scanFiles(listOf(old.path, nb.path))
@@ -161,8 +187,9 @@ class LibraryViewModel(private val app: Application) : AndroidViewModel(app) {
             val r = withContext(Dispatchers.IO) { FileOps.copy(File(b.path), dir) }
             r.onSuccess { f ->
                 val nb = f.toBook()
-                books.add(nb)
-                books.sortBy { it.title.lowercase() }
+                val target = if (isVideo(nb.path)) videos else books
+                target.add(nb)
+                target.sortBy { it.title.lowercase() }
                 scanFiles(listOf(nb.path))
                 tick++
                 message = "Copiado para ${dir.name}"
@@ -175,6 +202,7 @@ class LibraryViewModel(private val app: Application) : AndroidViewModel(app) {
             val ok = withContext(Dispatchers.IO) { FileOps.delete(File(b.path)) }
             if (ok) {
                 books.removeAll { it.path == b.path }
+                videos.removeAll { it.path == b.path }
                 Store.forget(app, b.path)
                 mapPlaylists { l -> l - b.path }
                 scanFiles(listOf(b.path))
