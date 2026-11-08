@@ -27,6 +27,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -42,7 +44,32 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme(colorScheme = darkColorScheme()) { App() } }
+        setContent {
+            var amoled by remember { mutableStateOf(Store.amoled(this@MainActivity)) }
+            val scheme = if (amoled) {
+                darkColorScheme(
+                    background = Color.Black,
+                    surface = Color.Black,
+                    surfaceTint = Color.Black,
+                    surfaceContainer = Color.Black,
+                    surfaceContainerHigh = Color(0xFF121212),
+                    surfaceContainerHighest = Color(0xFF1A1A1A)
+                )
+            } else {
+                darkColorScheme()
+            }
+            SideEffect {
+                val bar = if (amoled) Color.Black else Color(0xFF1C1B1F)
+                window.statusBarColor = bar.toArgb()
+                window.navigationBarColor = bar.toArgb()
+            }
+            MaterialTheme(colorScheme = scheme) {
+                App(amoled = amoled, onAmoled = {
+                    amoled = it
+                    Store.setAmoled(this@MainActivity, it)
+                })
+            }
+        }
     }
 }
 
@@ -69,7 +96,7 @@ private sealed interface Dlg {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun App(vm: LibraryViewModel = viewModel()) {
+fun App(amoled: Boolean, onAmoled: (Boolean) -> Unit, vm: LibraryViewModel = viewModel()) {
     val ctx = LocalContext.current
     var access by remember { mutableStateOf(hasAccess(ctx)) }
     var tab by remember { mutableIntStateOf(0) }
@@ -88,7 +115,7 @@ fun App(vm: LibraryViewModel = viewModel()) {
     LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= 33) notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
-    LaunchedEffect(access) { if (access) vm.scan() }
+    LaunchedEffect(access) { if (access) vm.scanAll() }
     LaunchedEffect(vm.message) {
         val m = vm.message
         if (m != null) {
@@ -112,9 +139,9 @@ fun App(vm: LibraryViewModel = viewModel()) {
         snackbarHost = { SnackbarHost(snack) },
         topBar = {
             TopAppBar(
-                title = { Text("Milk Audiobooks") },
+                title = { Text("AVI") },
                 actions = {
-                    IconButton(onClick = { if (access) vm.scan() }) {
+                    IconButton(onClick = { if (access) vm.scanAll() }) {
                         Icon(Icons.Filled.Refresh, contentDescription = "Reescanear")
                     }
                 }
@@ -149,13 +176,79 @@ fun App(vm: LibraryViewModel = viewModel()) {
             }
 
             TabRow(selectedTabIndex = tab) {
-                Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Biblioteca") })
+                Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Áudios") })
                 Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Playlists") })
+                Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("Vídeos") })
+                Tab(selected = tab == 3, onClick = { tab = 3 }, text = { Text("Config") })
             }
-            if (tab == 0) {
-                LibraryTab(vm, holder) { dlg = it }
-            } else {
-                PlaylistsTab(vm, holder, openList, { openList = it }) { dlg = it }
+            when (tab) {
+                0 -> LibraryTab(vm, holder) { dlg = it }
+                1 -> PlaylistsTab(vm, holder, openList, { openList = it }) { dlg = it }
+                2 -> VideosTab(vm, holder) { dlg = it }
+                else -> SettingsTab(amoled, onAmoled)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsTab(amoled: Boolean, onAmoled: (Boolean) -> Unit) {
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Tema AMOLED", style = MaterialTheme.typography.bodyLarge)
+                Text("Fundo preto puro (#000000)", style = MaterialTheme.typography.bodySmall)
+            }
+            Switch(checked = amoled, onCheckedChange = onAmoled)
+        }
+        HorizontalDivider(Modifier.padding(vertical = 16.dp))
+        Text("AVI - Audiobook + Video Integrated", style = MaterialTheme.typography.bodyLarge)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Player de vídeo inspirado no One Player (Apache 2.0, Zakir Sheikh).",
+            style = MaterialTheme.typography.bodySmall
+        )
+    }
+}
+
+@Composable
+private fun VideosTab(vm: LibraryViewModel, holder: PlayerHolder, show: (Dlg) -> Unit) {
+    val ctx = LocalContext.current
+    var query by remember { mutableStateOf("") }
+    val tick = vm.tick
+
+    Column(Modifier.fillMaxSize()) {
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            label = { Text("Buscar vídeos") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
+        )
+        if (vm.scanningV) {
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+            Text("${vm.videos.size} encontrados...", Modifier.padding(12.dp))
+        } else {
+            Text("${vm.videos.size} vídeos", Modifier.padding(12.dp))
+        }
+
+        val shown = vm.videos.filter {
+            query.isBlank() || it.title.contains(query, true) || it.folder.contains(query, true)
+        }
+        LazyColumn(Modifier.fillMaxSize()) {
+            items(shown, key = { it.path }) { b ->
+                val open: () -> Unit = {
+                    holder.controller?.pause()
+                    ctx.startActivity(Intent(ctx, VideoActivity::class.java).putExtra("path", b.path))
+                }
+                val actions: List<Pair<String, () -> Unit>> = listOf(
+                    "Reproduzir" to open,
+                    "Renomear" to { show(Dlg.Rename(b)) },
+                    "Mover" to { show(Dlg.Pick(b, true)) },
+                    "Copiar" to { show(Dlg.Pick(b, false)) },
+                    "Excluir" to { show(Dlg.Delete(b)) }
+                )
+                BookRow(b, tick, actions) { open() }
             }
         }
     }
@@ -372,7 +465,7 @@ private fun Dialogs(dlg: Dlg?, set: (Dlg?) -> Unit, vm: LibraryViewModel, holder
 
         is Dlg.Delete -> AlertDialog(
             onDismissRequest = close,
-            title = { Text("Excluir áudio?") },
+            title = { Text("Excluir arquivo?") },
             text = { Text("\"${dlg.b.title}\" será apagado do aparelho. Não dá para desfazer.") },
             confirmButton = {
                 TextButton(onClick = {
